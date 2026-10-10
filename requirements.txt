@@ -1,0 +1,17 @@
+# core analysis
+numpy>=2.0
+pandas>=2.2
+scipy>=1.13
+statsmodels>=0.14
+matplotlib>=3.9
+python-dotenv>=1.0
+# collection
+google-api-python-client>=2.180
+sqlalchemy>=2.0
+langdetect==1.0.9
+# labeling
+requests>=2.32
+torch>=2.4
+transformers>=4.45
+# tests
+pytest>=8.0

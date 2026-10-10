@@ -1,0 +1,22 @@
+.env
+.DS_Store
+__pycache__/
+*.py[cod]
+.venv/
+.ipynb_checkpoints/
+.vscode/
+.pytest_cache/
+*.egg-info/
+
+# data and outputs are produced by the pipeline; the public release is published separately
+data/*
+!data/README.md
+results/*
+!results/.gitkeep
+figures/*
+!figures/.gitkeep
+annotation/*.csv
+*.db
+*.sqlite3
+*.log
+collection_log.txt
