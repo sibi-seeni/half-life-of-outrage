@@ -28,6 +28,7 @@ src/hlo/
   eval/
     agreement.py           κ, AC1, Krippendorff's α, bootstrap CIs
     gold.py                gold-set export (random + stratified, blind) and evaluation
+    model_compare.py       Llama vs Gemma vs humans; disagreement-based selective relabeling
   analysis/
     panel.py               join labels, daily aspect series
     decay.py               sentiment/attention half-life
@@ -66,6 +67,23 @@ python -m hlo.eval.gold evaluate --a1 annotation/annotator1.csv --a2 annotation/
 ```
 
 Every number in the paper is read from a file in `results/`. Nothing is copied by hand.
+
+### Second model and selective relabeling
+
+Gemma-4-31B labels the same comments with the same prompt (`absa_v2`). It's used to check the main labels, not to replace them:
+
+```bash
+# gold set only (a few dollars): Llama vs Gemma vs humans, and the routing simulation
+cut -d, -f1 annotation/gold_adjudicated.csv | tail -n +2 > gold_ids.txt
+python -m hlo.label.llm_labeler --model gemma-4-31b-it --ids gold_ids.txt --out data/labels_gemma.csv
+python -m hlo.eval.model_compare evaluate --gold annotation/gold_adjudicated.csv   # -> results/model_comparison.json
+
+# optional, full dataset: blind sheet of every comment the two models disagree on
+python -m hlo.label.llm_labeler --model gemma-4-31b-it --out data/labels_gemma.csv
+python -m hlo.eval.model_compare queue                                            # -> data/relabel_queue.csv
+```
+
+The routing simulation sends a human only the comments where Llama and Gemma disagree. It compares the resulting accuracy with sending the same number of comments chosen by lowest Llama confidence, or at random. Pricing per model is set in `MODEL_PRICES` in `llm_labeler.py`: Llama $0.40/$0.40 and Gemma $0.12/$0.36 per million input/output tokens. Other models need `--price-in`/`--price-out`.
 
 Context ablation (used for the labeling-reliability analysis): `python -m hlo.label.llm_labeler --ids gold_ids.txt --no-context --out data/labels_llm_nocontext.csv`.
 

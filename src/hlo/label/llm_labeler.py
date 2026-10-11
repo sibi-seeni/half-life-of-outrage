@@ -13,7 +13,9 @@ Prompt versions:
            comments only. This produced the final labels; non-game rows get
            game_related="No" and an empty category, which is why ~1/3 of rows have no aspect.
 
-Usage: python -m hlo.label.llm_labeler [--limit N] [--ids FILE] [--no-context] [--out PATH]
+Usage: python -m hlo.label.llm_labeler [--model M] [--limit N] [--ids FILE] [--no-context] [--out PATH]
+       Second model (gold set or full data, always into its own file):
+       python -m hlo.label.llm_labeler --model gemma-4-31b-it --out data/labels_gemma.csv
 Env:   NAVIGATOR_API_KEYS=key1,key2   NAVIGATOR_BASE_URL (default https://api.ai.it.ufl.edu)
 """
 import argparse
@@ -39,7 +41,11 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 
 PROMPT_DIR = Path(__file__).parent / "prompts"
 BASE_URL = os.getenv("NAVIGATOR_BASE_URL", "https://api.ai.it.ufl.edu")
-COST_PER_M_IN = COST_PER_M_OUT = 0.40  # USD per million tokens (NaviGator rate at labeling time)
+# USD per million (input, output) tokens on NaviGator; override with --price-in/--price-out
+MODEL_PRICES = {
+    "llama-3.3-70b-instruct": (0.40, 0.40),
+    "gemma-4-31b-it": (0.12, 0.36),
+}
 BUDGET_PER_KEY = 24.50
 MAX_RETRIES = 3
 TIMEOUT = 45
@@ -74,11 +80,12 @@ class KeyRotator:
 
 
 class CostTracker:
-    def __init__(self, keys):
+    def __init__(self, keys, price_in, price_out):
         self.cost = {k: 0.0 for k in keys}
+        self.price_in, self.price_out = price_in, price_out
 
     def record(self, key, t_in, t_out):
-        self.cost[key] += t_in / 1e6 * COST_PER_M_IN + t_out / 1e6 * COST_PER_M_OUT
+        self.cost[key] += t_in / 1e6 * self.price_in + t_out / 1e6 * self.price_out
         return self.cost[key]
 
     def total(self):
@@ -101,8 +108,8 @@ def build_user_message(row, use_context=True):
     return "\n".join(parts)
 
 
-def call_api(key, system_prompt, user_message, model, json_mode=False):
-    payload = {"model": model, "temperature": 0.0, "max_tokens": 512,
+def call_api(key, system_prompt, user_message, model, json_mode=False, max_tokens=512):
+    payload = {"model": model, "temperature": 0.0, "max_tokens": max_tokens,
                "messages": [{"role": "system", "content": system_prompt},
                             {"role": "user", "content": user_message}]}
     if json_mode:
@@ -117,6 +124,12 @@ def call_api(key, system_prompt, user_message, model, json_mode=False):
 
 
 def _strip_fences(raw):
+    # Reasoning models (e.g. Gemma 4 with thinking on) may emit text or <think> blocks before the JSON.
+    raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
+    if "```" in raw and not raw.startswith("```"):
+        raw = raw[raw.index("```"):]
+    elif not raw.startswith(("{", "```")) and "{" in raw:
+        raw = raw[raw.index("{"):]
     if raw.startswith("```"):
         raw = raw.split("```")[1]
         if raw.startswith("json"):
@@ -182,13 +195,13 @@ def normalise(label):
             "parse_ok": True}
 
 
-def label_one(row, rotator, tracker, system_prompt, model, use_context, json_mode=False):
+def label_one(row, rotator, tracker, system_prompt, model, use_context, json_mode=False, max_tokens=512):
     msg = build_user_message(row, use_context)
     last_exc = None
     for attempt in range(1, MAX_RETRIES + 1):
         key = rotator.current()
         try:
-            resp = call_api(key, system_prompt, msg, model, json_mode)
+            resp = call_api(key, system_prompt, msg, model, json_mode, max_tokens)
             usage = resp.get("usage", {})
             t_in, t_out = usage.get("prompt_tokens", 0), usage.get("completion_tokens", 0)
             if tracker.record(key, t_in, t_out) >= BUDGET_PER_KEY:
@@ -221,13 +234,21 @@ def main():
     ap.add_argument("--no-context", action="store_true", help="comment text only (ablation)")
     ap.add_argument("--ids", help="optional file with one comment_id per line to label (e.g. the gold set)")
     ap.add_argument("--limit", type=int)
+    ap.add_argument("--max-tokens", type=int, default=512)
+    ap.add_argument("--price-in", type=float, help="USD per 1M input tokens (default: MODEL_PRICES)")
+    ap.add_argument("--price-out", type=float, help="USD per 1M output tokens (default: MODEL_PRICES)")
     args = ap.parse_args()
+    if args.model not in MODEL_PRICES and (args.price_in is None or args.price_out is None):
+        ap.error(f"no price known for {args.model}; pass --price-in and --price-out")
+    price_in, price_out = MODEL_PRICES.get(args.model, (None, None))
+    price_in = args.price_in if args.price_in is not None else price_in
+    price_out = args.price_out if args.price_out is not None else price_out
     ensure_dirs()
 
     system_prompt = (PROMPT_DIR / f"{args.prompt}.txt").read_text()
     prompt_sha = hashlib.sha256(system_prompt.encode()).hexdigest()[:12]
     keys = [k.strip() for k in os.getenv("NAVIGATOR_API_KEYS", "").split(",") if k.strip()]
-    rotator, tracker = KeyRotator(keys), CostTracker(keys)
+    rotator, tracker = KeyRotator(keys), CostTracker(keys, price_in, price_out)
 
     df = pd.read_csv(args.input, dtype={"comment_id": str})
     if args.ids:
@@ -250,7 +271,7 @@ def main():
             writer.writeheader()
         for i, row in enumerate(todo.to_dict("records"), 1):
             res = label_one(row, rotator, tracker, system_prompt, args.model,
-                            not args.no_context, args.json_mode)
+                            not args.no_context, args.json_mode, args.max_tokens)
             writer.writerow(res | {"comment_id": row["comment_id"], "model": args.model,
                                    "prompt_version": args.prompt, "prompt_sha256": prompt_sha,
                                    "context": not args.no_context})
