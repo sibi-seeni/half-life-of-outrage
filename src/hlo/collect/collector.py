@@ -1,4 +1,8 @@
-"""Collect all comments and replies for discovered videos (commentThreads.list / comments.list, 1 unit per call)."""
+"""Collect all comments and replies for discovered videos (commentThreads.list / comments.list, 1 unit per call).
+
+Only videos published on or before the study end date are visited, and comments or replies posted
+after it are skipped (hlo.config.END_DATE, default 2026-04-30). Like counts are as of collection time.
+"""
 import hashlib
 import os
 import time
@@ -9,6 +13,7 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
 from hlo.collect.database import Comment, SessionLocal, Video
+from hlo.config import end_datetime
 
 load_dotenv()
 _FMT = "%Y-%m-%dT%H:%M:%SZ"
@@ -24,8 +29,11 @@ def anonymize_id(user_id):
     return hashlib.sha256(user_id.encode("utf-8")).hexdigest()
 
 
-def save_comment(db, video_id, snippet, comment_id, seen, parent_id=None):
+def save_comment(db, video_id, snippet, comment_id, seen, parent_id=None, end=None):
     if comment_id in seen:
+        return
+    published = datetime.strptime(snippet["publishedAt"], _FMT)
+    if end is not None and published > end:
         return
     seen.add(comment_id)
     if db.query(Comment).filter_by(comment_id=comment_id).first():
@@ -37,7 +45,7 @@ def save_comment(db, video_id, snippet, comment_id, seen, parent_id=None):
         author_hash=anonymize_id(snippet.get("authorDisplayName")),
         text=snippet["textDisplay"],
         like_count=snippet.get("likeCount", 0),
-        published_at=datetime.strptime(snippet["publishedAt"], _FMT),
+        published_at=published,
         last_updated_at=datetime.strptime(snippet["updatedAt"], _FMT),
     ))
 
@@ -57,6 +65,7 @@ def _all_replies(youtube, parent_id):
 
 
 def collect_video(youtube, db, video):
+    end = end_datetime()
     seen = set()
     page_token = None
     while True:
@@ -68,13 +77,14 @@ def collect_video(youtube, db, video):
 
         for item in response.get("items", []):
             top = item["snippet"]["topLevelComment"]
-            save_comment(db, video.video_id, top["snippet"], top["id"], seen)
+            save_comment(db, video.video_id, top["snippet"], top["id"], seen, end=end)
 
             embedded = item.get("replies", {}).get("comments", [])
             if item["snippet"].get("totalReplyCount", 0) > len(embedded):
                 embedded = _all_replies(youtube, top["id"])
             for reply in embedded:
-                save_comment(db, video.video_id, reply["snippet"], reply["id"], seen, parent_id=top["id"])
+                save_comment(db, video.video_id, reply["snippet"], reply["id"], seen,
+                             parent_id=top["id"], end=end)
 
         page_token = response.get("nextPageToken")
         if not page_token:
@@ -85,7 +95,10 @@ def collect_comments():
     youtube = get_youtube_client()
     db = SessionLocal()
     try:
-        for video in db.query(Video).filter(Video.comments_disabled.is_(False)).all():
+        videos = (db.query(Video)
+                  .filter(Video.comments_disabled.is_(False), Video.published_at <= end_datetime())
+                  .all())
+        for video in videos:
             print(f"Collecting: {video.title}")
             try:
                 collect_video(youtube, db, video)

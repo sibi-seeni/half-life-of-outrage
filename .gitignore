@@ -20,3 +20,5 @@ annotation/*.csv
 *.sqlite3
 *.log
 collection_log.txt
+logs/*
+!logs/.gitkeep

@@ -36,12 +36,15 @@ src/hlo/
     windows.py             event windows, engagement-weighted gap
     run.py                 runs everything, writes results/*.json and figures/
 scripts/
+  hipergator/              SLURM jobs: environment setup + RoBERTa on a B200 GPU
   run_all.sh               end-to-end run + robustness grid
   export_release.py        public release: IDs + labels, no text
   rehydrate.py             rebuild comment text from released IDs
 annotation/GUIDELINES.md   instructions given to human annotators
 tests/                     unit tests + an end-to-end run on synthetic data
 ```
+
+Study window: **2021-12-09 to 2026-04-30** (`END_DATE` in `src/hlo/config.py`). For step-by-step instructions (Mac + HiPerGator), see **[docs/RUNNING.md](docs/RUNNING.md)**.
 
 ## Setup
 

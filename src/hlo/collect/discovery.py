@@ -3,6 +3,7 @@
 Two passes per keyword:
   1. Backfill: walks backwards in 90-day windows from the last cursor until BACKFILL_START.
   2. Recent: everything published since RECENT_START.
+Nothing published after the study end date (hlo.config.END_DATE, default 2026-04-30) is searched.
 Only videos in the Gaming category (id 20) whose *title* contains a keyword are kept.
 """
 import os
@@ -12,6 +13,7 @@ from dotenv import load_dotenv
 from googleapiclient.discovery import build
 
 from hlo.collect.database import CollectionState, SessionLocal, Video, _utcnow
+from hlo.config import end_datetime
 
 load_dotenv()
 
@@ -75,6 +77,10 @@ def _search_window(youtube, db, keyword, published_after, published_before, seen
             return added
 
 
+def _search_end():
+    return min(_utcnow(), end_datetime())
+
+
 def search_new_videos():
     youtube = get_youtube_client()
     db = SessionLocal()
@@ -83,14 +89,14 @@ def search_new_videos():
         for keyword in KEYWORDS:
             state = db.query(CollectionState).filter_by(keyword=keyword).first()
             if not state:
-                state = CollectionState(keyword=keyword, last_search_time=_utcnow())
+                state = CollectionState(keyword=keyword, last_search_time=_search_end())
                 db.add(state)
                 db.commit()
-            cursor = state.last_search_time
+            cursor = min(state.last_search_time, _search_end())
 
             backfill_after = max(BACKFILL_START, cursor - timedelta(days=WINDOW_DAYS))
             n_back = _search_window(youtube, db, keyword, backfill_after, cursor, seen)
-            n_recent = _search_window(youtube, db, keyword, RECENT_START, _utcnow(), seen)
+            n_recent = _search_window(youtube, db, keyword, RECENT_START, _search_end(), seen)
             print(f"'{keyword}': +{n_back} backfill ({backfill_after:%Y-%m-%d}..{cursor:%Y-%m-%d}), +{n_recent} recent")
 
             # Move the backfill cursor back so the next run covers the previous 90-day window.

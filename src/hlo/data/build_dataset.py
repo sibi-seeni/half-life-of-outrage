@@ -15,7 +15,8 @@ import sqlite3
 import numpy as np
 import pandas as pd
 
-from hlo.config import DATA_DIR, DATASET_CSV, GAME_LAUNCH, RANDOM_SEED, RESULTS_DIR, ensure_dirs
+from hlo.config import (DATA_DIR, DATASET_CSV, END_DATE, GAME_LAUNCH, RANDOM_SEED, RESULTS_DIR,
+                        end_datetime, ensure_dirs)
 
 QUERY = """
 SELECT c.comment_id, c.text, c.published_at AS comment_date, c.author_hash, c.parent_id,
@@ -73,6 +74,11 @@ def preprocess_text(text):
 def build(db_path, min_words=3):
     flow = {}
     df = load_raw(db_path)
+    flow["db_comments"] = len(df)
+    # Enforce the study window even if the DB holds later rows (e.g. from older collection runs).
+    end = pd.Timestamp(end_datetime())
+    df = df[(df["comment_date"] <= end) & (df["video_date"] <= end)].reset_index(drop=True)
+    flow["end_date"] = END_DATE
     flow["raw_comments"] = len(df)
     flow["raw_videos"] = int(df["video_id"].nunique())
     flow["raw_channels"] = int(df["channel_id"].nunique())
