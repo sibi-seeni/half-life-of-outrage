@@ -12,6 +12,7 @@ from dotenv import load_dotenv
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
+from hlo.collect.api import DailyQuotaExhausted, execute
 from hlo.collect.database import Comment, SessionLocal, Video
 from hlo.config import end_datetime
 
@@ -54,10 +55,10 @@ def _all_replies(youtube, parent_id):
     """commentThreads only embeds up to 5 replies; page through comments.list for the rest."""
     page_token = None
     while True:
-        response = youtube.comments().list(
+        response = execute(youtube.comments().list(
             part="snippet", parentId=parent_id, maxResults=100,
             pageToken=page_token, textFormat="plainText",
-        ).execute()
+        ))
         yield from response.get("items", [])
         page_token = response.get("nextPageToken")
         if not page_token:
@@ -69,10 +70,10 @@ def collect_video(youtube, db, video):
     seen = set()
     page_token = None
     while True:
-        response = youtube.commentThreads().list(
+        response = execute(youtube.commentThreads().list(
             part="snippet,replies", videoId=video.video_id, maxResults=100,
             order="time", pageToken=page_token, textFormat="plainText",
-        ).execute()
+        ))
         time.sleep(0.1)
 
         for item in response.get("items", []):
@@ -103,6 +104,10 @@ def collect_comments():
             try:
                 collect_video(youtube, db, video)
                 db.commit()
+            except DailyQuotaExhausted:
+                db.commit()  # keep what this video already gave; it is revisited next run
+                print("Daily YouTube quota used up. Progress is saved; run the same command again tomorrow.")
+                raise
             except HttpError as e:
                 db.rollback()
                 if "commentsDisabled" in str(e):

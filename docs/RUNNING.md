@@ -21,11 +21,13 @@ Put your existing files in `data/`:
 Then, in order:
 
 ```bash
-python -m hlo.collect full          # adds 2026-03-14 .. 2026-04-30; rerun daily if the API quota runs out
+python -m hlo.collect full          # adds 2026-03-14 .. 2026-04-30; resumable, see quota note below
 python -m hlo.data.build_dataset    # rebuilds data/comments_clean.csv (up to 2026-04-30)
 python -m hlo.label.llm_labeler --limit 5     # smoke test: check data/labels_llm.csv looks right
 python -m hlo.label.llm_labeler     # labels only comments not labeled yet (resumable, Ctrl-C safe)
 ```
+
+**YouTube quota.** A search costs 100 of the 10,000 daily units, so discovery needs roughly 2–4 days of runs. Per-minute limits are handled automatically (it pauses and retries). When the daily quota runs out it prints "Daily YouTube quota used up", saves progress and exits; run the same command the next day (quota resets at midnight Pacific). Finished search windows are skipped on reruns. Once discovery reports nothing new, `python -m hlo.collect comments` alone fetches comments (1 unit per page, much cheaper).
 
 `caffeinate -i` in front of a long command stops the Mac from sleeping, e.g. `caffeinate -i python -m hlo.label.llm_labeler`.
 Labeling goes about 4 s per comment, so a large batch takes hours. It resumes where it left off.
