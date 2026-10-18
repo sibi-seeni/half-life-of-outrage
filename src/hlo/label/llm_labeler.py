@@ -13,7 +13,7 @@ Prompt versions:
            comments only. This produced the final labels; non-game rows get
            game_related="No" and an empty category, which is why ~1/3 of rows have no aspect.
 
-Usage: python -m hlo.label.llm_labeler [--model M] [--limit N] [--ids FILE] [--no-context] [--out PATH]
+Usage: python -m hlo.label.llm_labeler [--model M] [--limit N] [--ids FILE] [--no-context] [--out PATH] [--workers N]
        Second model (gold set or full data, always into its own file):
        python -m hlo.label.llm_labeler --model gemma-4-31b-it --out data/labels_gemma.csv
 Env:   NAVIGATOR_API_KEYS=key1,key2   NAVIGATOR_BASE_URL (default https://api.ai.it.ufl.edu)
@@ -26,7 +26,9 @@ import logging
 import os
 import random
 import re
+import threading
 import time
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
 
 import pandas as pd
@@ -62,31 +64,37 @@ class KeyRotator:
         if not keys:
             raise ValueError("Set NAVIGATOR_API_KEYS (comma-separated).")
         self.keys, self.active, self.idx = list(keys), list(range(len(keys))), 0
+        self.lock = threading.Lock()
 
     def current(self):
-        if not self.active:
-            raise RuntimeError("All API keys retired.")
-        return self.keys[self.active[self.idx % len(self.active)]]
+        with self.lock:
+            if not self.active:
+                raise RuntimeError("All API keys retired.")
+            return self.keys[self.active[self.idx % len(self.active)]]
 
     def advance(self):
-        if self.active:
-            self.idx = (self.idx + 1) % len(self.active)
+        with self.lock:
+            if self.active:
+                self.idx = (self.idx + 1) % len(self.active)
 
     def retire(self, key):
-        ki = self.keys.index(key)
-        if ki in self.active:
-            self.active.remove(ki)
-            log.warning("Key …%s retired, %d left", key[-4:], len(self.active))
+        with self.lock:
+            ki = self.keys.index(key)
+            if ki in self.active:
+                self.active.remove(ki)
+                log.warning("Key …%s retired, %d left", key[-4:], len(self.active))
 
 
 class CostTracker:
     def __init__(self, keys, price_in, price_out):
         self.cost = {k: 0.0 for k in keys}
         self.price_in, self.price_out = price_in, price_out
+        self.lock = threading.Lock()
 
     def record(self, key, t_in, t_out):
-        self.cost[key] += t_in / 1e6 * self.price_in + t_out / 1e6 * self.price_out
-        return self.cost[key]
+        with self.lock:
+            self.cost[key] += t_in / 1e6 * self.price_in + t_out / 1e6 * self.price_out
+            return self.cost[key]
 
     def total(self):
         return sum(self.cost.values())
@@ -237,6 +245,7 @@ def main():
     ap.add_argument("--max-tokens", type=int, default=512)
     ap.add_argument("--price-in", type=float, help="USD per 1M input tokens (default: MODEL_PRICES)")
     ap.add_argument("--price-out", type=float, help="USD per 1M output tokens (default: MODEL_PRICES)")
+    ap.add_argument("--workers", type=int, default=1, help="concurrent API requests (try 3-4; lower if you see 429s)")
     args = ap.parse_args()
     if args.model not in MODEL_PRICES and (args.price_in is None or args.price_out is None):
         ap.error(f"no price known for {args.model}; pass --price-in and --price-out")
@@ -257,6 +266,11 @@ def main():
     out = Path(args.out)
     done = set()
     if out.exists():  # resume, retrying rows that failed last time
+        with out.open(newline="", encoding="utf-8") as fh:
+            header = next(csv.reader(fh), [])
+        if header != OUT_FIELDS:
+            raise SystemExit(f"{out} has columns {header}, expected {OUT_FIELDS}. "
+                             "Migrate it (scripts/migrate_labels.py) or pass a different --out.")
         prev = pd.read_csv(out, dtype={"comment_id": str})
         done = set(prev.loc[prev["parse_ok"].astype(str) == "True", "comment_id"])
     todo = df[~df["comment_id"].isin(done)]
@@ -269,15 +283,31 @@ def main():
         writer = csv.DictWriter(fh, fieldnames=OUT_FIELDS, extrasaction="ignore")
         if write_header:
             writer.writeheader()
-        for i, row in enumerate(todo.to_dict("records"), 1):
-            res = label_one(row, rotator, tracker, system_prompt, args.model,
-                            not args.no_context, args.json_mode, args.max_tokens)
-            writer.writerow(res | {"comment_id": row["comment_id"], "model": args.model,
-                                   "prompt_version": args.prompt, "prompt_sha256": prompt_sha,
-                                   "context": not args.no_context})
-            if i % 200 == 0:
-                fh.flush()
-                log.info("%d/%d labeled, cost so far $%.2f", i, len(todo), tracker.total())
+        rows = iter(todo.to_dict("records"))
+        pending, i = {}, 0
+        # Workers only call the API; this thread does all the writing, so rows never interleave.
+        # At most 2*workers requests are queued, so an interrupt loses only those (they redo on resume).
+        with ThreadPoolExecutor(max_workers=max(1, args.workers)) as pool:
+            while True:
+                while len(pending) < 2 * max(1, args.workers):
+                    row = next(rows, None)
+                    if row is None:
+                        break
+                    fut = pool.submit(label_one, row, rotator, tracker, system_prompt, args.model,
+                                      not args.no_context, args.json_mode, args.max_tokens)
+                    pending[fut] = row["comment_id"]
+                if not pending:
+                    break
+                finished, _ = wait(pending, return_when=FIRST_COMPLETED)
+                for fut in finished:
+                    cid = pending.pop(fut)
+                    writer.writerow(fut.result() | {"comment_id": cid, "model": args.model,
+                                                    "prompt_version": args.prompt, "prompt_sha256": prompt_sha,
+                                                    "context": not args.no_context})
+                    i += 1
+                    if i % 200 == 0:
+                        fh.flush()
+                        log.info("%d/%d labeled, cost so far $%.2f", i, len(todo), tracker.total())
     log.info("Done. Total cost $%.2f. Keep the last row per comment_id when reading (retries append).",
              tracker.total())
 
