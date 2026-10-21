@@ -2,15 +2,19 @@
 
 Only videos published on or before the study end date are visited, and comments or replies posted
 after it are skipped (hlo.config.END_DATE, default 2026-04-30). Like counts are as of collection time.
+
+A video is marked comments_collected_at once all its pages are fetched, and later runs skip it, so
+each day's quota goes to videos not yet collected. first_from/first_to put an upload-date range first.
 """
 import hashlib
 import os
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 
 from dotenv import load_dotenv
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
+from sqlalchemy import and_, case, exists
 
 from hlo.collect.api import DailyQuotaExhausted, execute
 from hlo.collect.database import Comment, SessionLocal, Video
@@ -92,17 +96,44 @@ def collect_video(youtube, db, video):
             return
 
 
-def collect_comments():
+def mark_collected_from_existing():
+    """One-off for databases from before comments_collected_at: mark every video that has comments.
+
+    The video a quota stop interrupted is marked too, so it may be incomplete; there is one per
+    past run at most.
+    """
+    db = SessionLocal()
+    try:
+        has_comments = exists().where(Comment.video_id == Video.video_id)
+        n = (db.query(Video)
+             .filter(Video.comments_collected_at.is_(None), has_comments)
+             .update({Video.comments_collected_at: datetime.now(timezone.utc).replace(tzinfo=None)},
+                     synchronize_session=False))
+        db.commit()
+        print(f"Marked {n} videos with existing comments as collected.")
+    finally:
+        db.close()
+
+
+def collect_comments(first_from=None, first_to=None):
     youtube = get_youtube_client()
     db = SessionLocal()
     try:
-        videos = (db.query(Video)
-                  .filter(Video.comments_disabled.is_(False), Video.published_at <= end_datetime())
-                  .all())
+        query = db.query(Video).filter(Video.comments_disabled.is_(False),
+                                       Video.comments_collected_at.is_(None),
+                                       Video.published_at <= end_datetime())
+        order = [Video.published_at]
+        if first_from or first_to:
+            in_range = and_(*([Video.published_at >= first_from] if first_from else []),
+                            *([Video.published_at < first_to] if first_to else []))
+            order.insert(0, case((in_range, 0), else_=1))
+        videos = query.order_by(*order).all()
+        print(f"{len(videos)} videos left to collect")
         for video in videos:
-            print(f"Collecting: {video.title}")
+            print(f"Collecting: {video.published_at:%Y-%m-%d} {video.title}")
             try:
                 collect_video(youtube, db, video)
+                video.comments_collected_at = datetime.now(timezone.utc).replace(tzinfo=None)
                 db.commit()
             except DailyQuotaExhausted:
                 db.commit()  # keep what this video already gave; it is revisited next run

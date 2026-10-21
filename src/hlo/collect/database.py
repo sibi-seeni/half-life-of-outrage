@@ -1,7 +1,7 @@
 """SQLite schema for videos, comments (with reply threading) and incremental search state."""
 from datetime import datetime, timezone
 
-from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, String, Text, create_engine
+from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, String, Text, create_engine, inspect, text
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker
 
 from hlo.config import DB_URL, ensure_dirs
@@ -27,6 +27,7 @@ class Video(Base):
     keyword_matched = Column(String)
     first_seen_at = Column(DateTime, default=_utcnow)
     comments_disabled = Column(Boolean, default=False)
+    comments_collected_at = Column(DateTime, nullable=True)  # set once every comment page was fetched
 
     comments = relationship("Comment", back_populates="video")
 
@@ -55,3 +56,9 @@ class CollectionState(Base):
 
 def init_db():
     Base.metadata.create_all(bind=engine)
+    # databases created before comments_collected_at existed
+    if "comments_collected_at" not in {c["name"] for c in inspect(engine).get_columns("videos")}:
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE videos ADD COLUMN comments_collected_at DATETIME"))
+    with engine.begin() as conn:
+        conn.execute(text("CREATE INDEX IF NOT EXISTS ix_comments_video_id ON comments (video_id)"))
