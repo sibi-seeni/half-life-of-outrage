@@ -1,0 +1,1 @@
+Of the 321,550 labels, 181,165 came from an earlier run with the same model and prompt. Relabeling a random 500 of them with the final pipeline gave κ = 0.96 (95% CI 0.94–0.98) on the full label. The negative share among game comments changed by 0.5 points.
