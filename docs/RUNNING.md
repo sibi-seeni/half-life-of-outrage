@@ -58,7 +58,7 @@ cd half-life-of-outrage
 ```bash
 sbatch scripts/hipergator/setup_env.sbatch             # prints: Submitted batch job 1234567
 squeue -u $USER                                        # ST column: PD = waiting, R = running; gone = finished
-tail -f logs/hlo-setup_1234567.out                     # watch the log live (Ctrl-C stops watching, not the job)
+tail -f logs/hlo-setup_<job_id>.out                   # watch the log live (Ctrl-C stops watching, not the job)
 ```
 It should end with `Setup finished.` This installs into `/blue/eee6778/$USER/hlo`, not into the system, so you don't need admin rights. If `/blue/eee6778` doesn't exist for you, run `export HLO_WORK=$HOME/hlo` before both `sbatch` commands.
 
