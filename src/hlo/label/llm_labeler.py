@@ -203,6 +203,21 @@ def normalise(label):
             "parse_ok": True}
 
 
+def key_is_dead(resp):
+    """True if the error means this key can't serve requests (retrying it only adds failures).
+    NaviGator (LiteLLM) answers 422 budget_exceeded for a spent key and 400 "Invalid model name"
+    for a key without access to the model."""
+    if resp is None:
+        return False
+    if resp.status_code in (401, 403):
+        return True
+    try:
+        err = resp.json().get("error", {})
+    except ValueError:
+        return False
+    return err.get("type") == "budget_exceeded" or "Invalid model name" in str(err.get("message", ""))
+
+
 def label_one(row, rotator, tracker, system_prompt, model, use_context, json_mode=False, max_tokens=512):
     msg = build_user_message(row, use_context)
     last_exc = None
@@ -219,8 +234,7 @@ def label_one(row, rotator, tracker, system_prompt, model, use_context, json_mod
             return parse_response(resp) | {"tokens_in": t_in, "tokens_out": t_out}
         except requests.exceptions.HTTPError as exc:
             last_exc = exc
-            status = exc.response.status_code if exc.response is not None else 0
-            if status in (401, 403):
+            if key_is_dead(exc.response):
                 rotator.retire(key)
             else:
                 rotator.advance()
@@ -284,12 +298,12 @@ def main():
         if write_header:
             writer.writeheader()
         rows = iter(todo.to_dict("records"))
-        pending, i = {}, 0
+        pending, i, out_of_keys = {}, 0, False
         # Workers only call the API; this thread does all the writing, so rows never interleave.
         # At most 2*workers requests are queued, so an interrupt loses only those (they redo on resume).
         with ThreadPoolExecutor(max_workers=max(1, args.workers)) as pool:
             while True:
-                while len(pending) < 2 * max(1, args.workers):
+                while not out_of_keys and len(pending) < 2 * max(1, args.workers):
                     row = next(rows, None)
                     if row is None:
                         break
@@ -301,13 +315,21 @@ def main():
                 finished, _ = wait(pending, return_when=FIRST_COMPLETED)
                 for fut in finished:
                     cid = pending.pop(fut)
-                    writer.writerow(fut.result() | {"comment_id": cid, "model": args.model,
+                    try:
+                        result = fut.result()
+                    except RuntimeError:  # every key retired: nothing left to send with
+                        out_of_keys = True
+                        continue
+                    writer.writerow(result | {"comment_id": cid, "model": args.model,
                                                     "prompt_version": args.prompt, "prompt_sha256": prompt_sha,
                                                     "context": not args.no_context})
                     i += 1
                     if i % 200 == 0:
                         fh.flush()
                         log.info("%d/%d labeled, cost so far $%.2f", i, len(todo), tracker.total())
+    if out_of_keys:
+        raise SystemExit(f"Stopped after {i}/{len(todo)} rows: all API keys are spent or lack model access. "
+                         "Add a working key to NAVIGATOR_API_KEYS and rerun; it resumes where it stopped.")
     log.info("Done. Total cost $%.2f. Keep the last row per comment_id when reading (retries append).",
              tracker.total())
 
