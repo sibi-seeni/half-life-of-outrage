@@ -32,6 +32,7 @@ def load_llm(path=LLM_LABELS_CSV):
 def export(n_random, n_strat, n_overlap, seed=RANDOM_SEED):
     data = pd.read_csv(DATASET_CSV, dtype={"comment_id": str})
     llm = load_llm()
+    llm = llm[llm["parse_ok"].astype(str) == "True"]  # else PARSE_ERROR becomes its own stratum
     rng = np.random.default_rng(seed)
 
     rand = data.sample(n=n_random, random_state=seed).assign(stratum="random")
